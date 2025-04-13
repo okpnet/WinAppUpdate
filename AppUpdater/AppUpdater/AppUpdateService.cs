@@ -42,7 +42,7 @@ namespace AppUpdater
         /// <summary>
         /// クローズアクション
         /// </summary>
-        public Action AppCloseAction { get; init; }
+        public Action? AppCloseAction { get; init; }
         /// <summary>
         /// 準備完了
         /// </summary>
@@ -58,7 +58,7 @@ namespace AppUpdater
         /// <summary>
         /// コンストラクタ
         /// </summary>
-        public AppUpdateService(Action appclose, FileInfo publicKeyPath, Uri appcastUrl)
+        public AppUpdateService(FileInfo publicKeyPath, Uri appcastUrl, Action? appclose)
         {
 
             _appcastUrl = appcastUrl;
@@ -82,7 +82,7 @@ namespace AppUpdater
             _info = _sparkle.CheckForUpdatesQuietly().Result;
         }
 
-        public AppUpdateService(ILogger<AppUpdateService> logger, Action appclose, FileInfo publicKeyPath, Uri appcastUrl) : this(appclose, publicKeyPath, appcastUrl)
+        public AppUpdateService(ILogger<AppUpdateService> logger, FileInfo publicKeyPath, Uri appcastUrl, Action? appclose) : this(publicKeyPath, appcastUrl, appclose)
         {
             _logger = logger;
         }
@@ -123,9 +123,13 @@ namespace AppUpdater
                 })
             );
 
-            _disposables.Add(//終了イベント
-                Observable.FromEventPattern(_sparkle, nameof(_sparkle.CloseApplication)).Subscribe(t => AppCloseAction.Invoke() )
-                );
+            if(AppCloseAction is not null)
+            {
+                _disposables.Add(//終了イベント
+                    Observable.FromEventPattern(_sparkle, nameof(_sparkle.CloseApplication)).Subscribe(t => AppCloseAction.Invoke() )
+                    );
+            }
+
         }
         /// <summary>
         /// アップデート実行
