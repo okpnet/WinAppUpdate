@@ -2,6 +2,7 @@
 using NetSparkleUpdater;
 using NetSparkleUpdater.Enums;
 using NetSparkleUpdater.SignatureVerifiers;
+using System.Reactive;
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
@@ -69,11 +70,11 @@ namespace AppUpdater
         /// <summary>
         /// コンストラクタ
         /// </summary>
-        public AppUpdateService(Action appclose, FileInfo publicKeyPath, Uri appcastUrl)
+        private AppUpdateService(Ed25519Checker publicKey, Uri appcastUrl,Action? appclose,ILogger? logger)
         {
 
             _appcastUrl = appcastUrl;
-            AppCloseAction = appCloseAction;
+            AppCloseAction = appclose;
             UpdateReady = false;
             _logger = logger;
             _sparkle = new SparkleUpdater
@@ -83,6 +84,7 @@ namespace AppUpdater
                 )
             {
                 UIFactory = null,
+                RelaunchAfterUpdate = false
             };
 
             UpdateStandbyEvent = _subject.Where(t => t.State == UpdateState.UpdateStandby).AsObservable();//準備完了イベント
@@ -92,18 +94,17 @@ namespace AppUpdater
 
             _sparkle.StartLoop(true);
         }
-
-        public AppUpdateService(ILogger<AppUpdateService> logger, FileInfo publicKeyPath, Uri appcastUrl, Action? appclose) : this(publicKeyPath, appcastUrl, appclose)
-        {
-            _logger = logger;
-        }
         /// <summary>
         /// イベント追加
         /// </summary>
         private void AddEvent()
         {
+            _sparkle.UpdateCheckFinished += (s, e) =>
+            {
+                Console.WriteLine($"[🔥 イベント発火] UpdateCheckFinished: {e}");
+            };
             _disposables.Add(//チェック完了イベント
-                Observable.FromEventPattern<object, UpdateStatus>(_sparkle, nameof(UpdateCheckFinished))
+                Observable.FromEventPattern<object, UpdateStatus>(_sparkle, nameof(_sparkle.UpdateCheckFinished))
                 .Subscribe(async (t) =>
                 {
                     var updateInfo = await _sparkle.CheckForUpdatesQuietly();
@@ -150,11 +151,16 @@ namespace AppUpdater
             if(AppCloseAction is not null)
             {
                 _disposables.Add(//終了イベント
-                    Observable.FromEventPattern(_sparkle, nameof(_sparkle.CloseApplication)).Subscribe(t => AppCloseAction.Invoke() )
+                    Observable.FromEvent<CloseApplication, Unit>(
+                        handler => () => handler(Unit.Default),
+                        h => _sparkle.CloseApplication += h,
+                        h => _sparkle.CloseApplication -= h).
+                        Subscribe(_ => AppCloseAction.Invoke())
                     );
             }
 
         }
+       
         /// <summary>
         /// アップデート実行
         /// </summary>
@@ -175,6 +181,11 @@ namespace AppUpdater
                 UpdateEventArg.NotAvailableUpdate() : UpdateEventArg.StandbyUpdate(_downloadFile, updateDate.Version??"");
 
             action(arg);
+            if (arg.IsCancel)
+            {
+                return;
+            }
+            await _sparkle.InstallUpdate(updateDate);
         }
         /// <summary>
         /// Dispose
