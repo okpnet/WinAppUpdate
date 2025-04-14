@@ -99,10 +99,6 @@ namespace AppUpdater
         /// </summary>
         private void AddEvent()
         {
-            _sparkle.UpdateCheckFinished += (s, e) =>
-            {
-                Console.WriteLine($"[🔥 イベント発火] UpdateCheckFinished: {e}");
-            };
             _disposables.Add(//チェック完了イベント
                 Observable.FromEventPattern<object, UpdateStatus>(_sparkle, nameof(_sparkle.UpdateCheckFinished))
                 .Subscribe(async (t) =>
