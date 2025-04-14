@@ -2,11 +2,9 @@
 using NetSparkleUpdater;
 using NetSparkleUpdater.Enums;
 using NetSparkleUpdater.SignatureVerifiers;
-using System.Runtime.InteropServices.JavaScript;
-using System;
 using System.Reactive.Disposables;
-using System.Reactive.Subjects;
 using System.Reactive.Linq;
+using System.Reactive.Subjects;
 
 namespace AppUpdater
 {
@@ -15,10 +13,6 @@ namespace AppUpdater
         readonly SparkleUpdater _sparkle = default!;
         readonly ILogger? _logger;
         readonly Subject<UpdateEventArg> _subject = new();
-        /// <summary>
-        /// アップデート情報
-        /// </summary>
-        UpdateInfo _info;
         /// <summary>
         /// イベントハンドラDispose
         /// </summary>
@@ -42,7 +36,7 @@ namespace AppUpdater
         /// <summary>
         /// クローズアクション
         /// </summary>
-        public Action AppCloseAction { get; init; }
+        public Action? AppCloseAction { get; init; }
         /// <summary>
         /// 準備完了
         /// </summary>
@@ -55,19 +49,37 @@ namespace AppUpdater
         /// アップデートステータスチェックイベント
         /// </summary>
         public IObservable<UpdateEventArg> UpdateCheckFinishedEvent { get; }
+
+        public static AppUpdateService CreateAppUpdateService(string publicKey, Uri appcastUrl, Action? appclose,ILogger<AppUpdateService>? logger=null)
+        {
+            var key=new Ed25519Checker(SecurityMode.Unsafe, publicKey);
+            return new AppUpdateService(key, appcastUrl, appclose, logger);
+        }
+
+        public static AppUpdateService CreateAppUpdateService(FileInfo publicKeyFile, Uri appcastUrl, Action? appclose, ILogger<AppUpdateService>? logger = null)
+        {
+            if (!publicKeyFile.Exists)
+            {
+                throw new FileNotFoundException($"publicKeyFile '{publicKeyFile.Name}' is not found.");
+            }
+            var key = new Ed25519Checker(SecurityMode.Unsafe, null , publicKeyFile.FullName);
+            return new AppUpdateService(key, appcastUrl, appclose, logger);
+        }
+
         /// <summary>
         /// コンストラクタ
         /// </summary>
-        public AppUpdateService(Action appclose, FileInfo publicKeyPath, Uri appcastUrl)
+        private AppUpdateService(Ed25519Checker publicKey, Uri appcastUrl,Action? appCloseAction,ILogger? logger)
         {
 
             _appcastUrl = appcastUrl;
-            AppCloseAction = appclose;
+            AppCloseAction = appCloseAction;
             UpdateReady = false;
+            _logger = logger;
             _sparkle = new SparkleUpdater
                 (
                     _appcastUrl.AbsoluteUri,
-                    new Ed25519Checker(SecurityMode.Unsafe, publicKeyPath.FullName)
+                    publicKey
                 )
             {
                 UIFactory = null,
@@ -79,7 +91,6 @@ namespace AppUpdater
             AddEvent();
 
             _sparkle.StartLoop(true);
-            _info = _sparkle.CheckForUpdatesQuietly().Result;
         }
 
         public AppUpdateService(ILogger<AppUpdateService> logger, Action appclose, FileInfo publicKeyPath, Uri appcastUrl) : this(appclose, publicKeyPath, appcastUrl)
@@ -93,10 +104,14 @@ namespace AppUpdater
         {
             _disposables.Add(//チェック完了イベント
                 Observable.FromEventPattern<object, UpdateStatus>(_sparkle, nameof(UpdateCheckFinished))
-                .Subscribe((t) =>
+                .Subscribe(async (t) =>
                 {
+                    var updateInfo = await _sparkle.CheckForUpdatesQuietly();
+                    if (_sparkle is null || updateInfo is null || !updateInfo.Updates.Any()) 
+                    {
+                        return;
+                    }
 
-                    if (_sparkle is null || _info is null || !_info.Updates.Any()) return;
                     var arg = t.EventArgs == UpdateStatus.UpdateAvailable ?
                             UpdateEventArg.AvailableUpdate() : UpdateEventArg.NotAvailableUpdate();
                     _subject.OnNext(arg);
@@ -104,41 +119,60 @@ namespace AppUpdater
                     {
                         return;
                     }
-                    var updateDate = _info.Updates.Last();
-                    _sparkle.InitAndBeginDownload(updateDate);
+
+                    var updateDate = updateInfo.Updates.Last();
+                    await _sparkle.InitAndBeginDownload(updateDate);
                 })
             );
 
             _disposables.Add(//準備完了イベント
                 Observable.FromEventPattern<object, string>(_sparkle, nameof(_sparkle.DownloadFinished)).
-                Subscribe((t) =>
+                Subscribe(async (t) =>
                 {
-                    if (_sparkle is null || _info is null) return;
-                    var updater = _info.Updates.LastOrDefault();
-                    if (updater is null) return;
+                    var updateInfo = await _sparkle.CheckForUpdatesQuietly();
+                    if (_sparkle is null || updateInfo is null || !updateInfo.Updates.Any())
+                    {
+                        return;
+                    }
+
+                    var updater = updateInfo.Updates.Last();
+                    if (updater is null) 
+                    {
+                        return;
+                    }
 
                     _downloadFile = new(t.EventArgs);
-                    _subject.OnNext(UpdateEventArg.StandbyUpdate(_downloadFile, updater.Version));
+                    _subject.OnNext(UpdateEventArg.StandbyUpdate(_downloadFile, updater.Version??""));
                     UpdateReady = true;
                 })
             );
 
-            _disposables.Add(//終了イベント
-                Observable.FromEventPattern(_sparkle, nameof(_sparkle.CloseApplication)).Subscribe(t => AppCloseAction.Invoke() )
-                );
+            if(AppCloseAction is not null)
+            {
+                _disposables.Add(//終了イベント
+                    Observable.FromEventPattern(_sparkle, nameof(_sparkle.CloseApplication)).Subscribe(t => AppCloseAction.Invoke() )
+                    );
+            }
+
         }
         /// <summary>
         /// アップデート実行
         /// </summary>
-        public void Update(Action<UpdateEventArg> action)
+        public async Task UpdateAsync(Action<UpdateEventArg> action)
         {
-            if (_sparkle is null || _info is null)
+            var updateInfo = await _sparkle.CheckForUpdatesQuietly();
+            if (_sparkle is null && updateInfo is null)
             {
                 throw new NullReferenceException($"NetSparkleUpdater requierd for update is null.");
             }
-            var updateDate = _info.Updates.FirstOrDefault();
+            if (!updateInfo.Updates.Any())
+            {
+                UpdateEventArg.NotAvailableUpdate();
+                return;
+            }
+            var updateDate = updateInfo.Updates.First();
             var arg = _downloadFile is null ?
-                UpdateEventArg.NotAvailableUpdate() : UpdateEventArg.StandbyUpdate(_downloadFile, updateDate.Version);
+                UpdateEventArg.NotAvailableUpdate() : UpdateEventArg.StandbyUpdate(_downloadFile, updateDate.Version??"");
 
             action(arg);
         }
