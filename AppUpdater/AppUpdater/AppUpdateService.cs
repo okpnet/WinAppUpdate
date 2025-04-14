@@ -69,7 +69,7 @@ namespace AppUpdater
         /// <summary>
         /// コンストラクタ
         /// </summary>
-        private AppUpdateService(Ed25519Checker publicKey, Uri appcastUrl,Action? appCloseAction,ILogger? logger)
+        public AppUpdateService(Action appclose, FileInfo publicKeyPath, Uri appcastUrl)
         {
 
             _appcastUrl = appcastUrl;
@@ -93,7 +93,7 @@ namespace AppUpdater
             _sparkle.StartLoop(true);
         }
 
-        public AppUpdateService(ILogger<AppUpdateService> logger, Action appclose, FileInfo publicKeyPath, Uri appcastUrl) : this(appclose, publicKeyPath, appcastUrl)
+        public AppUpdateService(ILogger<AppUpdateService> logger, FileInfo publicKeyPath, Uri appcastUrl, Action? appclose) : this(publicKeyPath, appcastUrl, appclose)
         {
             _logger = logger;
         }
