@@ -7,7 +7,6 @@ using System.Reactive;
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
-using System.Reflection;
 
 namespace AppUpdater
 {
@@ -60,13 +59,28 @@ namespace AppUpdater
         /// ダウンロードの進捗イベント
         /// </summary>
         public IObservable<UpdateProgressEventArg> UpdaterDownloadProgressEvent { get; }
-
+        /// <summary>
+        /// ファクトリ
+        /// </summary>
+        /// <param name="publicKey"></param>
+        /// <param name="appcastUrl"></param>
+        /// <param name="appclose"></param>
+        /// <param name="logger"></param>
+        /// <returns></returns>
         public static AppUpdateService CreateAppUpdateService(string publicKey, Uri appcastUrl, Action? appclose,ILogger<AppUpdateService>? logger=null)
         {
             var key=new Ed25519Checker(SecurityMode.Unsafe, publicKey);
             return new AppUpdateService(key, appcastUrl, appclose, logger);
         }
-
+        /// <summary>
+        /// ファクトリ
+        /// </summary>
+        /// <param name="publicKeyFile"></param>
+        /// <param name="appcastUrl"></param>
+        /// <param name="appclose"></param>
+        /// <param name="logger"></param>
+        /// <returns></returns>
+        /// <exception cref="FileNotFoundException"></exception>
         public static AppUpdateService CreateAppUpdateService(FileInfo publicKeyFile, Uri appcastUrl, Action? appclose, ILogger<AppUpdateService>? logger = null)
         {
             if (!publicKeyFile.Exists)
@@ -76,7 +90,13 @@ namespace AppUpdater
             var key = new Ed25519Checker(SecurityMode.Unsafe, null , publicKeyFile.FullName);
             return new AppUpdateService(key, appcastUrl, appclose, logger);
         }
-
+        /// <summary>
+        /// プライベートコンストラクタ
+        /// インスタンスの生成はファクトリメソッドから。
+        /// </summary>
+        /// <param name="source"></param>
+        /// <param name="castItem"></param>
+        /// <returns></returns>
         private string CreateFilePath(string source,AppCastItem castItem)
         {
             if(castItem.DownloadLink is (null or ""))
@@ -89,11 +109,11 @@ namespace AppUpdater
             return path;
         }
         /// <summary>
-        /// コンストラクタ
+        /// プライベートコンストラクタ
+        /// インスタンスの生成はファクトリメソッドから。
         /// </summary>
         private AppUpdateService(Ed25519Checker publicKey, Uri appcastUrl,Action? appclose,ILogger? logger)
         {
-
             _appcastUrl = appcastUrl;
             AppCloseAction = appclose;
             UpdateReady = false;
@@ -109,14 +129,13 @@ namespace AppUpdater
             };
 
             UpdateStandbyEvent = _subject.OfType<UpdateEventArg>().Where(t => t.State == UpdateState.UpdateStandby).AsObservable();//準備完了イベント
-            UpdateCheckFinishedEvent = _subject.OfType<UpdateEventArg>().Where(t => t.IsCheckFinished).AsObservable();//チェック完了イベント
-            UpdaterDownloadProgressEvent= _subject.OfType<UpdateProgressEventArg>().AsObservable();
-
+            UpdateCheckFinishedEvent = _subject.OfType<UpdateEventArg>().Where(t => t.State != UpdateState.UpdateStandby).AsObservable();//チェック完了イベント
+            UpdaterDownloadProgressEvent= _subject.OfType<UpdateProgressEventArg>().AsObservable();//ダウンロード進捗イベント
 
             AddEvent();
         }
         /// <summary>
-        /// イベント追加
+        /// NetSparkleUpdaterのイベントへ購読者を追加する
         /// </summary>
         private void AddEvent()
         {
@@ -179,32 +198,9 @@ namespace AppUpdater
                     })
                 );
 
-            //_disposables.Add(//チェック完了イベント
-            //    Observable.FromEventPattern<object, UpdateStatus>(_sparkle, nameof(_sparkle.UpdateCheckFinished))
-            //    .Subscribe(async (t) =>
-            //    {
-            //        var updateInfo = await _sparkle.CheckForUpdatesQuietly();
-            //        if (updateInfo is null || !updateInfo.Updates.Any())
-            //        {
-            //            return;
-            //        }
-
-            //        var arg = t.EventArgs == UpdateStatus.UpdateAvailable ?
-            //                UpdateEventArg.AvailableUpdate() : UpdateEventArg.NotAvailableUpdate();
-            //        _subject.OnNext(arg);
-            //        if (t.EventArgs != UpdateStatus.UpdateAvailable || arg.IsCancel)
-            //        {
-            //            return;
-            //        }
-
-            //        //var updateDate = updateInfo.Updates.Last();
-            //        //await _sparkle.InitAndBeginDownload(updateDate);
-            //    })
-            //);
-
             _disposables.Add(//ダウンロード完了
                 Observable.FromEventPattern<object, string>(_sparkle, nameof(_sparkle.DownloadFinished)).
-                Subscribe((t) =>
+                Subscribe(async (t) =>
                 {
                     _downloadFile = new(t.EventArgs);
                     var arg = UpdateEventArg.StandbyUpdate(_downloadFile, "");
@@ -213,13 +209,27 @@ namespace AppUpdater
 
                     if (arg.IsCancel || _appcastItem is null)
                     {
-                        System.Diagnostics.Debug.WriteLine("download complete cancel");
+                        _logger?.LogInformation("UPDATE CANCEL BY USER");
                         return;
                     }
+
+                    if (arg.ShouldWait)
+                    {
+                        try
+                        {
+                            await arg.UpdateTriggerTask;
+                        }
+                        catch (TaskCanceledException)
+                        {
+                            _logger?.LogInformation("CONTINUE FOR UPDATE CANCEL BY USER");
+                            return;
+                        }
+                    }
+
                     var filepath = CreateFilePath(t.EventArgs, _appcastItem);
                     System.IO.File.Delete(filepath);
                     System.IO.File.Move(t.EventArgs, filepath);
-                    _sparkle.InstallUpdate(_appcastItem, filepath);
+                    await _sparkle.InstallUpdate(_appcastItem, filepath);
                 })
             );
 
@@ -234,42 +244,18 @@ namespace AppUpdater
                     );
             }
         }
-
-        public async Task UpdateDitectAsync()
+        /// <summary>
+        /// 更新の確認
+        /// </summary>
+        /// <returns></returns>
+        public void UpdateDitectAsync()
         {
-            var updateInfo = await _sparkle.CheckForUpdatesQuietly();
+            var updateInfo = _sparkle.CheckForUpdatesQuietly().Result;
             if (updateInfo is null || !updateInfo.Updates.Any())
             {
                 return;
             }
             _appcastItem= updateInfo.Updates.LastOrDefault();
-        }
-
-        /// <summary>
-        /// アップデート実行
-        /// </summary>
-        public async Task UpdateAsync(Action<UpdateEventArg> action)
-        {
-            var updateInfo = await _sparkle.CheckForUpdatesQuietly();
-            if (_sparkle is null && updateInfo is null)
-            {
-                throw new NullReferenceException($"NetSparkleUpdater requierd for update is null.");
-            }
-            if (!updateInfo.Updates.Any())
-            {
-                UpdateEventArg.NotAvailableUpdate();
-                return;
-            }
-            var updateDate = updateInfo.Updates.First();
-            var arg = _downloadFile is null ?
-                UpdateEventArg.NotAvailableUpdate() : UpdateEventArg.StandbyUpdate(_downloadFile, updateDate.Version??"");
-
-            action(arg);
-            if (arg.IsCancel)
-            {
-                return;
-            }
-            await _sparkle.InstallUpdate(updateDate);
         }
         /// <summary>
         /// Dispose
