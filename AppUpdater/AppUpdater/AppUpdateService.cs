@@ -127,7 +127,7 @@ namespace AppUpdater
                         return;
                     }
 
-                    //var updateDate = updateInfo.Updates.Last();
+                    //var updateDate = updateInfocur.Updates.Last();
                     //await _sparkle.InitAndBeginDownload(updateDate);
                 })
             );
