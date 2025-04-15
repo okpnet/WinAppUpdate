@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Logging;
 using NetSparkleUpdater;
 using NetSparkleUpdater.Enums;
+using NetSparkleUpdater.Events;
 using NetSparkleUpdater.SignatureVerifiers;
 using System.Reactive;
 using System.Reactive.Disposables;
@@ -92,19 +93,28 @@ namespace AppUpdater
 
             AddEvent();
 
-            _sparkle.StartLoop(true);
+            _sparkle.CheckForUpdatesQuietly();
         }
         /// <summary>
         /// イベント追加
         /// </summary>
         private void AddEvent()
         {
+            _disposables.Add(
+                Observable.FromEventPattern<UpdateDetectedEventArgs>(_sparkle,nameof(_sparkle.UpdateDetected)).Subscribe(e=>
+                    {//アップデートが見つかったとき
+                        var arg = UpdateEventArg.AvailableUpdate(); 
+                        _subject.OnNext(arg);
+                        e.EventArgs.NextAction = NextUpdateAction.PerformUpdateUnattended;
+                    })
+                );
+
             _disposables.Add(//チェック完了イベント
                 Observable.FromEventPattern<object, UpdateStatus>(_sparkle, nameof(_sparkle.UpdateCheckFinished))
                 .Subscribe(async (t) =>
                 {
                     var updateInfo = await _sparkle.CheckForUpdatesQuietly();
-                    if (_sparkle is null || updateInfo is null || !updateInfo.Updates.Any()) 
+                    if (updateInfo is null || !updateInfo.Updates.Any()) 
                     {
                         return;
                     }
@@ -117,8 +127,8 @@ namespace AppUpdater
                         return;
                     }
 
-                    var updateDate = updateInfo.Updates.Last();
-                    await _sparkle.InitAndBeginDownload(updateDate);
+                    //var updateDate = updateInfo.Updates.Last();
+                    //await _sparkle.InitAndBeginDownload(updateDate);
                 })
             );
 
@@ -157,6 +167,16 @@ namespace AppUpdater
 
         }
        
+        public async Task UpdateDitectAsync()
+        {
+            var updateInfo=await _sparkle.CheckForUpdatesQuietly();
+            if(updateInfo is null || !updateInfo.Updates.Any())
+            {
+                return;
+            }
+
+        }
+
         /// <summary>
         /// アップデート実行
         /// </summary>
