@@ -202,8 +202,12 @@ namespace AppUpdater
                 Observable.FromEventPattern<object, string>(_sparkle, nameof(_sparkle.DownloadFinished)).
                 Subscribe(async (t) =>
                 {
+                    if(_appcastItem is null)
+                    {
+                        return;
+                    }
                     _downloadFile = new(t.EventArgs);
-                    var arg = UpdateEventArg.StandbyUpdate(_downloadFile, "");
+                    var arg = UpdateEventArg.StandbyUpdate(_downloadFile, _appcastItem.Version??"");
                     _subject.OnNext(arg);
                     UpdateReady = true;
 
@@ -248,9 +252,9 @@ namespace AppUpdater
         /// 更新の確認
         /// </summary>
         /// <returns></returns>
-        public void UpdateDitectAsync()
+        public async void UpdateDitectAsync()
         {
-            var updateInfo = _sparkle.CheckForUpdatesQuietly().Result;
+            var updateInfo =await _sparkle.CheckForUpdatesQuietly();
             if (updateInfo is null || !updateInfo.Updates.Any())
             {
                 return;
