@@ -7,6 +7,7 @@ using System.Reactive;
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
+using System.Reflection;
 
 namespace AppUpdater
 {
@@ -14,7 +15,7 @@ namespace AppUpdater
     {
         readonly SparkleUpdater _sparkle = default!;
         readonly ILogger? _logger;
-        readonly Subject<UpdateEventArg> _subject = new();
+        readonly Subject<ICancelEventArg> _subject = new();
         /// <summary>
         /// イベントハンドラDispose
         /// </summary>
@@ -31,6 +32,10 @@ namespace AppUpdater
         /// ダウンロードしたアップデートファイル
         /// </summary>
         FileInfo? _downloadFile;
+        /// <summary>
+        /// 更新情報
+        /// </summary>
+        AppCastItem? _appcastItem;
         /// <summary>
         /// Sparkleインスタンス
         /// </summary>
@@ -51,6 +56,10 @@ namespace AppUpdater
         /// アップデートステータスチェックイベント
         /// </summary>
         public IObservable<UpdateEventArg> UpdateCheckFinishedEvent { get; }
+        /// <summary>
+        /// ダウンロードの進捗イベント
+        /// </summary>
+        public IObservable<UpdateProgressEventArg> UpdaterDownloadProgressEvent { get; }
 
         public static AppUpdateService CreateAppUpdateService(string publicKey, Uri appcastUrl, Action? appclose,ILogger<AppUpdateService>? logger=null)
         {
@@ -68,6 +77,17 @@ namespace AppUpdater
             return new AppUpdateService(key, appcastUrl, appclose, logger);
         }
 
+        private string CreateFilePath(string source,AppCastItem castItem)
+        {
+            if(castItem.DownloadLink is (null or ""))
+            {
+                return string.Empty;
+            }
+            var url = new Uri(castItem.DownloadLink);
+            var filename = System.IO.Path.GetFileName(url.LocalPath);
+            var path = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(source)!, filename);
+            return path;
+        }
         /// <summary>
         /// コンストラクタ
         /// </summary>
@@ -88,75 +108,124 @@ namespace AppUpdater
                 RelaunchAfterUpdate = false
             };
 
-            UpdateStandbyEvent = _subject.Where(t => t.State == UpdateState.UpdateStandby).AsObservable();//準備完了イベント
-            UpdateCheckFinishedEvent = _subject.Where(t => t.IsCheckFinished).AsObservable();//チェック完了イベント
+            UpdateStandbyEvent = _subject.OfType<UpdateEventArg>().Where(t => t.State == UpdateState.UpdateStandby).AsObservable();//準備完了イベント
+            UpdateCheckFinishedEvent = _subject.OfType<UpdateEventArg>().Where(t => t.IsCheckFinished).AsObservable();//チェック完了イベント
+            UpdaterDownloadProgressEvent= _subject.OfType<UpdateProgressEventArg>().AsObservable();
+
 
             AddEvent();
-
-            _sparkle.CheckForUpdatesQuietly();
         }
         /// <summary>
         /// イベント追加
         /// </summary>
         private void AddEvent()
         {
-            _disposables.Add(
-                Observable.FromEventPattern<UpdateDetectedEventArgs>(_sparkle,nameof(_sparkle.UpdateDetected)).Subscribe(e=>
+            _disposables.Add(//更新の確認
+                Observable.FromEventPattern<UpdateDetectedEventArgs>(_sparkle,nameof(_sparkle.UpdateDetected)).Subscribe(async e=>
                     {//アップデートが見つかったとき
                         var arg = UpdateEventArg.AvailableUpdate(); 
                         _subject.OnNext(arg);
-                        e.EventArgs.NextAction = NextUpdateAction.PerformUpdateUnattended;
+                        if (arg.IsCancel || e.EventArgs.AppCastItems.Count==0)
+                        {
+                            return;
+                        }
+                        _appcastItem = e.EventArgs.LatestVersion;
+                        await _sparkle.InitAndBeginDownload(_appcastItem);//最新バージョンの取得
+                        //e.EventArgs.NextAction = NextUpdateAction.PerformUpdateUnattended;
                     })
                 );
 
-            _disposables.Add(//チェック完了イベント
-                Observable.FromEventPattern<object, UpdateStatus>(_sparkle, nameof(_sparkle.UpdateCheckFinished))
-                .Subscribe(async (t) =>
-                {
-                    var updateInfo = await _sparkle.CheckForUpdatesQuietly();
-                    if (updateInfo is null || !updateInfo.Updates.Any()) 
+            _disposables.Add(//更新のダウンロード開始
+                Observable.FromEvent<ItemDownloadProgressEvent,UpdateProgressEventArg>(
+                    handler => (sender, item, e) =>
                     {
-                        return;
-                    }
+                        var arg = new UpdateProgressEventArg(e.ProgressPercentage,DownloadState.Downloading);
+                        handler(arg);
+                    },
+                    h => _sparkle.DownloadMadeProgress += h,
+                    h => _sparkle.DownloadMadeProgress -= h
+                    ).Subscribe(t => _subject.OnNext(t))
+                );
 
-                    var arg = t.EventArgs == UpdateStatus.UpdateAvailable ?
-                            UpdateEventArg.AvailableUpdate() : UpdateEventArg.NotAvailableUpdate();
-                    _subject.OnNext(arg);
-                    if (t.EventArgs != UpdateStatus.UpdateAvailable || arg.IsCancel)
+            _disposables.Add(//更新のダウンロードのエラー
+                Observable.FromEvent<DownloadErrorEvent, UpdateProgressEventArg>(
+                    handler => (item, path, exception) =>
                     {
-                        return;
-                    }
+                        var arg = new UpdateProgressEventArg(0, DownloadState.Error, exception);
+                        handler(arg);
+                    },
+                    h => _sparkle.DownloadHadError += h,
+                    h => _sparkle.DownloadHadError -= h).
+                    Subscribe(t => {
+                        _appcastItem = null;
+                        _subject.OnNext(t);
 
-                    //var updateDate = updateInfocur.Updates.Last();
-                    //await _sparkle.InitAndBeginDownload(updateDate);
-                })
-            );
+                    })
+                );
 
-            _disposables.Add(//準備完了イベント
+            _disposables.Add(//更新のダウンロードキャンセル
+                Observable.FromEvent<DownloadEvent,UpdateProgressEventArg>(
+                    handler => (item, path) =>
+                    {
+                        var arg = new UpdateProgressEventArg(0, DownloadState.Cancel);
+                        handler(arg);
+                    },
+                    h => _sparkle.DownloadCanceled += h,
+                    h => _sparkle.DownloadCanceled += h
+                    ).Subscribe(t =>
+                    {
+                        _appcastItem=null;
+                        _subject.OnNext(t);
+                    })
+                );
+
+            //_disposables.Add(//チェック完了イベント
+            //    Observable.FromEventPattern<object, UpdateStatus>(_sparkle, nameof(_sparkle.UpdateCheckFinished))
+            //    .Subscribe(async (t) =>
+            //    {
+            //        var updateInfo = await _sparkle.CheckForUpdatesQuietly();
+            //        if (updateInfo is null || !updateInfo.Updates.Any())
+            //        {
+            //            return;
+            //        }
+
+            //        var arg = t.EventArgs == UpdateStatus.UpdateAvailable ?
+            //                UpdateEventArg.AvailableUpdate() : UpdateEventArg.NotAvailableUpdate();
+            //        _subject.OnNext(arg);
+            //        if (t.EventArgs != UpdateStatus.UpdateAvailable || arg.IsCancel)
+            //        {
+            //            return;
+            //        }
+
+            //        //var updateDate = updateInfo.Updates.Last();
+            //        //await _sparkle.InitAndBeginDownload(updateDate);
+            //    })
+            //);
+
+            _disposables.Add(//ダウンロード完了
                 Observable.FromEventPattern<object, string>(_sparkle, nameof(_sparkle.DownloadFinished)).
-                Subscribe(async (t) =>
+                Subscribe((t) =>
                 {
-                    var updateInfo = await _sparkle.CheckForUpdatesQuietly();
-                    if (_sparkle is null || updateInfo is null || !updateInfo.Updates.Any())
-                    {
-                        return;
-                    }
-
-                    var updater = updateInfo.Updates.Last();
-                    if (updater is null) 
-                    {
-                        return;
-                    }
-
                     _downloadFile = new(t.EventArgs);
-                    _subject.OnNext(UpdateEventArg.StandbyUpdate(_downloadFile, updater.Version??""));
+                    var arg = UpdateEventArg.StandbyUpdate(_downloadFile, "");
+                    _subject.OnNext(arg);
                     UpdateReady = true;
+
+                    if (arg.IsCancel || _appcastItem is null)
+                    {
+                        System.Diagnostics.Debug.WriteLine("download complete cancel");
+                        return;
+                    }
+                    var filepath = CreateFilePath(t.EventArgs, _appcastItem);
+                    System.IO.File.Delete(filepath);
+                    System.IO.File.Move(t.EventArgs, filepath);
+                    _sparkle.InstallUpdate(_appcastItem, filepath);
                 })
             );
 
-            if(AppCloseAction is not null)
-            {
-                _disposables.Add(//終了イベント
+            if (AppCloseAction is not null)
+            {//アプリケーションの終了イベント
+                _disposables.Add(
                     Observable.FromEvent<CloseApplication, Unit>(
                         handler => () => handler(Unit.Default),
                         h => _sparkle.CloseApplication += h,
@@ -164,17 +233,16 @@ namespace AppUpdater
                         Subscribe(_ => AppCloseAction.Invoke())
                     );
             }
-
         }
-       
+
         public async Task UpdateDitectAsync()
         {
-            var updateInfo=await _sparkle.CheckForUpdatesQuietly();
-            if(updateInfo is null || !updateInfo.Updates.Any())
+            var updateInfo = await _sparkle.CheckForUpdatesQuietly();
+            if (updateInfo is null || !updateInfo.Updates.Any())
             {
                 return;
             }
-
+            _appcastItem= updateInfo.Updates.LastOrDefault();
         }
 
         /// <summary>

@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 
 namespace AppUpdater
 {
-    public sealed class UpdateEventArg
+    public sealed class UpdateEventArg: ICancelEventArg
     {
         internal UpdateState State { get; }
 
