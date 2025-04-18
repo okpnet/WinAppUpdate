@@ -142,13 +142,13 @@ namespace AppUpdater
             _disposables.Add(//更新の確認
                 Observable.FromEventPattern<UpdateDetectedEventArgs>(_sparkle,nameof(_sparkle.UpdateDetected)).Subscribe(async e=>
                     {//アップデートが見つかったとき
-                        var arg = UpdateEventArg.AvailableUpdate(); 
+                        _appcastItem = e.EventArgs.LatestVersion;
+                        var arg = UpdateEventArg.AvailableUpdate(_appcastItem?.Version??""); 
                         _subject.OnNext(arg);
                         if (arg.IsCancel || e.EventArgs.AppCastItems.Count==0)
                         {
                             return;
                         }
-                        _appcastItem = e.EventArgs.LatestVersion;
                         await _sparkle.InitAndBeginDownload(_appcastItem);//最新バージョンの取得
                         //e.EventArgs.NextAction = NextUpdateAction.PerformUpdateUnattended;
                     })

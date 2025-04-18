@@ -80,7 +80,7 @@ namespace AppUpdater
         /// 更新があった
         /// </summary>
         /// <returns></returns>
-        public static UpdateEventArg AvailableUpdate() => new UpdateEventArg(UpdateState.UpdateAvailable, false, null, string.Empty);
+        public static UpdateEventArg AvailableUpdate(string version) => new UpdateEventArg(UpdateState.UpdateAvailable, false, null, version);
         /// <summary>
         /// ファクトリ
         /// 更新がなかった
